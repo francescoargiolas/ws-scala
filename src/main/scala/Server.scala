@@ -1,68 +1,109 @@
 import akka.Done
-import akka.actor.ActorSystem
-import akka.http.javadsl.server.PathMatcher1
-import akka.http.scaladsl.Http
-import akka.http.scaladsl.coding.Deflate
-import akka.http.scaladsl.model._
-import akka.stream.ActorMaterializer
-import akka.http.scaladsl.server.Directives._
 
-import scala.concurrent.{ExecutionContext, Future}
-import scala.io.StdIn
+import scala.concurrent.{Future, Promise}
 import akka.http.scaladsl.marshallers.sprayjson.SprayJsonSupport._
-import model.User
-import repo.UserRepo
-import spray.json.DefaultJsonProtocol._
+import model.{Books, User}
+import repo.{Book, LibraryDb, UserRepo}
+import utils.Common
+import akka.stream.scaladsl.Source
+import akka.util.ByteString
+import akka.http.scaladsl.Http
+import akka.http.scaladsl.model.{ContentTypes, HttpEntity}
+import akka.http.scaladsl.server.Directives._
+import akka.stream.ActorMaterializer
 
-object Server extends App {
+import scala.util.{Failure, Random, Success, Try}
+import scala.io.StdIn
+import adapter.Client
+import org.squeryl.PrimitiveTypeMode._
+import akka.actor.ActorSystem
+import akka.http.scaladsl.Http
+import akka.http.scaladsl.model._
+import akka.http.scaladsl.server.Directives._
+import akka.stream.ActorMaterializer
 
-  implicit val system: ActorSystem = ActorSystem("helloworld")
-  implicit val executionContext: ExecutionContext = system.dispatcher
-  implicit val materializer: ActorMaterializer = ActorMaterializer()
+import scala.io.StdIn
 
-  implicit val itemFormat = jsonFormat2(User)
+object Server extends App with Common {
 
-  /*
-  val route = concat {
-    get {
-      pathPrefix("getUser" / """\w+""".r) { username =>
-        // there might be no item for a given id
-        println("++ Call: user/"+username)
-        val maybeItem: Future[Option[User]] = UserRepo.getUser("sss")
+  val numbers = Source.fromIterator(() =>
+    Iterator.continually(Random.nextInt()))
 
-        onSuccess(maybeItem) {
-          case Some(item) => complete(item)
-          case None       => complete(StatusCodes.NotFound)
-        }
-      }
-    }
-    post {
-      path("user") {
-        entity(as[User]) { user =>
-          println("adding "+user)
-          val saved: Future[Done] = UserRepo.addUser(user)
-          onComplete(saved) { done =>
-            complete("user created")
-          }
-        }
-      }
-    }
-  }*/
-
-  val route = path("user") {
+  val route = pathPrefix("ws") {
     concat(
       get {
-        complete("get")
+        concat(
+            path("static") {
+
+              println("static")
+
+              val p = Promise[Books]()
+              inTransaction {
+
+                val books = from(LibraryDb.books)(select(_))
+                for (book <- books) {
+                  println(book)
+                }
+
+                p.complete( Try {
+                  Books(books.toSeq)
+                })
+
+              }
+
+              complete( p.future )
+
+            },
+            path("client") {
+
+              println("client ")
+              //complete( Client.execute )
+
+              Client.execute
+              complete("Done")
+
+            },
+            path("random") {
+              complete(
+                HttpEntity(
+                ContentTypes.`text/plain(UTF-8)`,
+                // transform each number to a chunk of bytes
+                //numbers.map(n => ByteString(s"$n\n"))
+                 "jhgjhgjh"
+              ))
+            },
+            pathPrefix( """\w+""".r ) { username =>
+              // there might be no item for a given id
+              val maybeItem: Future[Option[User]] = UserRepo.getUser(username)
+
+              onSuccess(maybeItem) {
+                case Some(item) => complete(item)
+                case None       => complete("user "+username+" not found")
+              }
+            }
+        )
       },
       post {
-        complete("post")
+        concat(
+          path( "user" ) {
+            entity(as[User]) { user =>
+              println("adding " + user)
+              val saved: Future[Done] = UserRepo.addUser(user)
+              onComplete(saved) { done =>
+                complete("user created")
+              }
+            }
+          }
+        )
       }
     )
   }
 
-  val bindingFuture = Http().bindAndHandle(route, "localhost", 8080)
+  val bindingFuture = Http().bindAndHandle(route, config.getString("http.interface"), config.getInt("http.port"))
 
-  println(s"Server online at http://localhost:8080/\nPress RETURN to stop...")
+  logger.info("+++Server start ")
+  logger.debug("+++Server start debug")
+  //println(s"Server online at http://localhost:8080/\nPress RETURN to stop...")
   StdIn.readLine() // let it run until user presses return
   bindingFuture
     .flatMap(_.unbind()) // trigger unbinding from the port
